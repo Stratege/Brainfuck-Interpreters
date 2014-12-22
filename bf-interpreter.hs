@@ -1,16 +1,13 @@
+import Prelude
 import Data.Char (ord,chr)
 import Data.Maybe
+import qualified Data.Sequence as Seq
+import qualified Data.Foldable as Fold
 
-data State a = State [a] [a] a
+data State a = State (Seq.Seq a) Int Int Bool Bool
+data Symbol = GoLeft | GoRight | Inc | Dec | Print | Read | StartLoop Int | EndLoop Int | Error Int deriving (Show)
 
-parse str = flip fixBrackets 0 . fromList . stringToSymList $ str
-
-fixBrackets st@(State l r (EndLoop 0)) n = fixBrackets (backToStart ((\(State l r a) -> (State l r (StartLoop n))) (multiple goLeft (State l r (EndLoop (-n))) n))) 0
-fixBrackets st@(State l r (StartLoop 0)) n = fixBrackets (goRight st) 1
-fixBrackets st@(State _ [] _) _ = backToStart st
-fixBrackets st@(State l r a) n = fixBrackets (goRight st) (n+1)
-
-backToStart st@(State l _ _) = multiple goLeft st (length l) 
+parse str = fromList . stringToSymList $ str
 
 stringToSymList = map (fromJust) . filter (isJust) . map charToSym
 
@@ -24,68 +21,70 @@ charToSym '[' = Just (StartLoop 0)
 charToSym ']' = Just (EndLoop 0)
 charToSym _ = Nothing
 
-data Symbol = GoLeft | GoRight | Inc | Dec | Print | Read | StartLoop Int | EndLoop Int | Error Int deriving (Show)
-
 type ProcessStack = State Symbol
 
 
 testPState = fromList [Print,GoRight,Print,GoRight,Print,Inc,Dec,GoRight,Inc,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight,Print,GoRight]
 testState = fromList ((map (fromChar) "Hello World") :: [Int])
 
-fromList (x:xs) = (State [] xs x)
-toList (State l r x) = l++(x:r)
+fromList ls = (State (Seq.fromList ls) 0 0 False True)
+toList (State ls _ _ _ _) = Fold.toList ls
 
 interpretate pState state = do
-	(newState,newPState) <- interpretateSym (getCurrentSym pState) state pState
-	let done = (\(State _ r _) -> null r) newPState
-	let newerPState = (goRight newPState)
-	if done then (putStr "\ndone\n") else
-		interpretate newerPState (return newState)
+		newState <- interpretateSym (getCurrentSym pState) state
+		let h = (\(State l i b s f) -> (l,i,b,s,f)) newState
+--		print (d,h)
+		let newPState = if ((\(State _ _ _ _ f) -> f == True) newState) then (goRight pState) else (goLeft pState)
+		let done = (\(State _ i _ _ _) (State l _ _ _ _) -> i >= Seq.length l) newPState pState
+		if done then (putStr "\ndone\n") else
+			interpretate newPState newState
+	where	g (State l i _ _ _) = (Seq.length l, i)
+		d = g pState
 
 
-interpretateString str = interpretate (parse str) (return $ fromList [def :: Int])
+interpretateString str = interpretate (parse str) (fromList [def :: Int])
 
-getCurrentSym (State _ _ a) = a		
 
-interpretateSym GoLeft state pState = f goLeft state pState
-interpretateSym GoRight state pState = f goRight state pState
-interpretateSym Inc state pState = f contentInc state pState
-interpretateSym Dec state pState = f contentDec state pState
-interpretateSym Print state pState = state >>= contentPrint >>= (\x -> return (x,pState))
-interpretateSym Read state pState = state >>= contentRead >>= (\x -> return (x,pState))
-interpretateSym (StartLoop n) state pState = state >>= (\x -> return (startLoop x pState n))
-interpretateSym (EndLoop n) state pState = state >>= (\x -> return (endLoop x pState n))
+interpretateSym (StartLoop n) state = return $ startLoop state
+interpretateSym (EndLoop n) state = return $ endLoop state
+interpretateSym _ st@(State _ _ _ True _) = return st
+interpretateSym GoLeft state = return $ goLeft state
+interpretateSym GoRight state = return $ goRight state
+interpretateSym Inc state = return $ contentInc state
+interpretateSym Dec state = return $ contentDec state
+interpretateSym Print state = contentPrint state 
+interpretateSym Read state = contentRead state 
 
-f g x z = x >>= (\y -> return $ (g y, z))
 
 goLeft :: Incrementable a => State a -> State a
-goLeft (State l r a)
-	| null l = (State [] (a:r) def)
-	| otherwise = (State (tail l) (a:r) (head l))
+goLeft (State l i d s f)
+	| i <= 0 = (State (def Seq.<| l) i d s f)
+	| otherwise = (State l (i-1) d s f)
 
 
 goRight :: Incrementable a => State a -> State a
-goRight (State l r a)
-	| null r = (State (a:l) [] def)
-	| otherwise = (State (a:l) (tail r) (head r))
+goRight (State l i d s f)
+	| (i+1) >= Seq.length l = (State (l Seq.|> def) (i+1) d s f)
+	| otherwise = (State l (i+1) d s f)
 
-contentInc :: Incrementable a => State a -> State a
-contentInc (State l r a) = (State l r (inc a))
+getCurrentSym = accessContent
+accessContent (State l i d s f) = Seq.index l i
+updateContent st@(State l i d s f) func = (State (Seq.update i (func $ accessContent st) l) i d s f)
 
-contentDec :: Incrementable a => State a -> State a
-contentDec (State l r a) = (State l r (dec a))
+contentInc st = updateContent st inc
+contentDec st = updateContent st dec
 
-contentPrint st@(State _ _ a) = (putChar . toChar $ a) >> return st
-contentRead (State l r _) = getChar >>= (\x -> return (State l r (fromChar x)))
+contentPrint st = (putChar . toChar $ accessContent st) >> return st
+contentRead st = getChar >>= (\x -> return (updateContent st (\y -> fromChar x)))
 
-startLoop st pSt n = loopHelper (==) goRight st pSt n
-endLoop st pSt n = loopHelper (/=) goLeft st pSt (-n)
-
-loopHelper op f st@(State _ _ a) pSt n = if (op a def) then (st,newPSt) else (st,pSt)
-	where newPSt = multiple f pSt n
-
-multiple f st 0 = st
-multiple f st n = multiple f (f st) (n -1)
+startLoop st@(State l i d s f)
+	| s == True && f == True = (State l i (d+1) s f)
+	| s == True && f == False = if (d == 0) then (State l i d False True) else (State l i (d-1) s f)
+	| s == False = if ((accessContent st) == def) then (State l i d True f) else st
+endLoop st@(State l i d s f)
+	| s == True && f == True = if (d == 0) then (State l i d False f) else (State l i (d-1) s f)
+	| s == True && f == False = (State l i (d+1) s f)
+	| s == False = if ((accessContent st) /= def) then (State l i d True False) else st
 
 
 class Incrementable a where
